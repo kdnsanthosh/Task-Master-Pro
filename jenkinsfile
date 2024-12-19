@@ -1,0 +1,130 @@
+pipeline {
+    agent any
+    tools {
+        jdk 'jdk17'
+        maven 'maven'
+    }
+    environment {
+        SCANNER_HOME = tool 'sonar-scanner'
+    }
+    stages {
+        stage('Git Checkout') {
+            steps {
+                checkout scmGit(branches: [[name: 'main']], extensions: [], userRemoteConfigs: [[url: 'https://github.com/kdnsanthosh/Task-Master-Pro.git']])
+            }
+        }
+        stage('Compile') {
+            steps {
+                sh "mvn compile"
+            }
+        }
+        stage('Test') {
+            steps {
+                sh "mvn package -DskipTests=true"
+            }
+        }
+        stage('Trivy Scan File System') {
+            steps {
+            sh "trivy fs --format table -o trivy-fs-report.html ."
+            }
+        }
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('sonar-server') {
+
+            sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectKey=TaskMaster -Dsonar.projectName=TaskMaster \
+                    -Dsonar.java.binaries=. '''
+                    }
+                }
+            }
+        stage('Build') {
+            steps {
+                sh "mvn package -DskipTests=true"
+
+            }
+        }
+        stage('Deploy Artifacts To Nexus') {
+            steps {
+                withMaven(globalMavenSettingsConfig: 'maven-settings', jdk:
+                'jdk17', maven: 'maven', mavenSettingsConfig: '', traceability: true) {
+                    sh "mvn deploy -DskipTests=true"
+                }
+            }
+        }
+        
+        stage('Build & Tag Docker Image') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker-cred',
+                    toolName: 'docker') {
+                            sh "docker build -t jilla5858/taskmaster:latest ."
+                    }
+                }
+            }
+        }
+        
+        stage('Trivy Scan Image') {
+            steps {
+                sh "trivy image --format table -o trivy-image-report.html jilla5858/taskmaster:latest"
+            }
+        }
+        stage('Publish Docker Image') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker-cred',
+                    toolName: 'docker') {
+                        sh "docker push jilla5858/taskmaster:latest"
+                    }
+                }
+            }
+        }
+        stage('Deploy To K8s') {
+            steps {
+                withKubeConfig(caCertificate: '', clusterName: 'do-blr1-k8s-mycluster-01', contextName: '', credentialsId: 'k8-token', namespace: 'webapps', restrictKubeConfigAccess: false, serverUrl: 'https://f53d48c8-2287-4a47-bf25-88141c3f8271.k8s.ondigitalocean.com') {
+                sh "kubectl apply -f deployment-service.yml -n webapps"
+                sleep 60
+                }
+            }
+        }
+        stage('Verify Deployment') {
+            steps {
+                withKubeConfig(caCertificate: '', clusterName: 'do-blr1-k8s-mycluster-01', contextName: '', credentialsId: 'k8-token', namespace: 'webapps', restrictKubeConfigAccess: false, serverUrl: 'https://f53d48c8-2287-4a47-bf25-88141c3f8271.k8s.ondigitalocean.com') {
+                sh "kubectl get pods -n webapps"
+                sh "kubectl get svc -n webapps"
+                }
+            }
+        }
+    }
+        post {
+            always {
+                script {
+                    def jobName = env.JOB_NAME
+                    def buildNumber = env.BUILD_NUMBER
+                    def pipelineStatus = currentBuild.result ?: 'UNKNOWN'
+                    def bannerColor = pipelineStatus.toUpperCase() == 'SUCCESS'? 'green' : 'red'
+                    def body = """
+                    <html>
+                    <body>
+                    <div style="border: 4px solid ${bannerColor}; padding:10px;">
+                    <h2>${jobName} - Build ${buildNumber}</h2>
+                    <div style="background-color: ${bannerColor}; padding:10px;">
+                    <h3 style="color: white;">Pipeline Status:${pipelineStatus.toUpperCase()}</h3>
+                    </div>
+                    <p>Check the <a href="${BUILD_URL}">console output</a>.</p>
+                    </div>
+                    </body>
+                    </html>
+                        """
+                    emailext (
+                    subject: "${jobName} - Build ${buildNumber} -${pipelineStatus.toUpperCase()}", body: body,
+                        to: 'kdnsanthosh@gmail.com',
+                        from: 'jenkins@example.com',
+                        replyTo: 'jilla58585858@gmail.com',
+                        mimeType: 'text/html',
+                        attachmentsPattern: 'trivy-image-report.html'
+                    )
+            }
+        }  
+        
+    }
+}
